@@ -1,0 +1,84 @@
+{
+    "name": "umbot-wechat-adapter",
+    "version": "1.0.0",
+    "description": "Official WeChat (Weixin) adapter for the umbot platform. Seamlessly build, deploy, and manage WeChat bots with a unified API.",
+    "keywords": [
+        "umbot",
+        "wechat",
+        "weixin",
+        "adapter",
+        "bot",
+        "chatbot",
+        "messaging",
+        "api",
+        "integration",
+        "nodejs",
+        "typescript"
+    ],
+    "homepage": "https://github.com/max36895/umbot-wechat-adapter#readme",
+    "bugs": {
+        "url": "https://github.com/max36895/umbot-wechat-adapter/issues"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/max36895/umbot-wechat-adapter.git"
+    },
+    "author": {
+        "name": "Maxim-M",
+        "email": "maximco36895@yandex.ru",
+        "url": "https://github.com/max36895"
+    },
+    "license": "MIT",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "type": "commonjs",
+    "scripts": {
+        "build": "tsc",
+        "test": "jest",
+        "bt": "npm run build && npm run test",
+        "test:coverage": "jest --coverage",
+        "typecheck": "tsc --noEmit",
+        "lint": "eslint . --ext .ts",
+        "prettier": "prettier --write .",
+        "deploy": "npm run build && npm publish"
+    },
+    "engines": {
+        "node": ">=20.0.0"
+    },
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "peerDependencies": {
+        "umbot": ">=3.0.0"
+    },
+    "devDependencies": {
+        "@types/jest": "^30.0.0",
+        "@types/node": "^20.19.30",
+        "jest": "^30.3.0",
+        "ts-jest": "^29.4.9",
+        "typescript": "^5.9.3",
+        "umbot": "^3.0.0",
+        "@eslint/js": "^10.0.1",
+        "@typescript-eslint/eslint-plugin": "^8.58.0",
+        "@typescript-eslint/parser": "^8.58.0",
+        "eslint": "^10.2.0",
+        "eslint-config-prettier": "^10.1.8",
+        "eslint-plugin-security": "^4.0.0",
+        "globals": "^17.4.0",
+        "prettier": "^3.8.1",
+        "typedoc": "^0.28.18",
+        "typescript-eslint": "^8.60.0"
+    },
+    "funding": {
+        "type": "individual",
+        "url": "https://boosty.to/max36895/donate"
+    },
+    "maintainers": [
+        {
+            "name": "max36895",
+            "email": "maximco36895@yandex.ru",
+            "url": "https://github.com/max36895"
+        }
+    ]
+}
