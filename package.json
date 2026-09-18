@@ -1,6 +1,6 @@
 {
     "name": "umbot-wechat-adapter",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Official WeChat (Weixin) adapter for the umbot platform. Seamlessly build, deploy, and manage WeChat bots with a unified API.",
     "keywords": [
         "umbot",
@@ -43,32 +43,33 @@
         "deploy": "npm run build && npm publish"
     },
     "engines": {
-        "node": ">=20.0.0"
+        "node": ">=20.19.0"
     },
     "files": [
         "dist",
-        "README.md"
+        "README.md",
+        "LICENSE.md"
     ],
     "peerDependencies": {
-        "umbot": ">=3.0.0"
+        "umbot": ">=3.1.0"
     },
     "devDependencies": {
+        "@eslint/js": "^10.0.1",
         "@types/jest": "^30.0.0",
         "@types/node": "^20.19.30",
-        "jest": "^30.3.0",
-        "ts-jest": "^29.4.9",
-        "typescript": "^5.9.3",
-        "umbot": "^3.0.0",
-        "@eslint/js": "^10.0.1",
         "@typescript-eslint/eslint-plugin": "^8.58.0",
         "@typescript-eslint/parser": "^8.58.0",
         "eslint": "^10.2.0",
         "eslint-config-prettier": "^10.1.8",
         "eslint-plugin-security": "^4.0.0",
         "globals": "^17.4.0",
+        "jest": "^30.3.0",
         "prettier": "^3.8.1",
+        "ts-jest": "^29.4.9",
         "typedoc": "^0.28.18",
-        "typescript-eslint": "^8.60.0"
+        "typescript": "^5.9.3",
+        "typescript-eslint": "^8.60.0",
+        "umbot": "^3.1.2"
     },
     "funding": {
         "type": "individual",

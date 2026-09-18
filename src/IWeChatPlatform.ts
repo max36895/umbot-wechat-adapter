@@ -3,45 +3,57 @@
  * @see https://developers.weixin.qq.com/doc/offiaccount/Message_Management/Receiving_standard_messages.html
  */
 
-/** Информация об отправителе */
-export interface IWeChatFromUser {
-    FromUserName: string;
-    CreateTime: number;
-    MsgType: string;
-    MsgId?: number;
-    MediaId?: string;
-    PicUrl?: string;
-    Recognition?: string;
-    Format?: string;
-    Title?: string;
-    Description?: string;
-    Url?: string;
-    ThumbMediaId?: string;
-    Event?: string;
-    EventKey?: string;
-    Ticket?: string;
-    Status?: string;
-}
-
 /** Входящий запрос от WeChat (распарсенный из XML) */
 export interface IWeChatRequestContent {
+    /** OpenID Official Account (получатель) */
     ToUserName: string;
+    /** OpenID отправителя — используется как `controller.userId` */
     FromUserName: string;
+    /** Время отправки, unix-time в секундах */
     CreateTime: number;
+    /** Тип сообщения: text, image, voice, video, shortvideo, location, link, event */
     MsgType: string;
+    /** Текст сообщения (MsgType: text) */
     Content?: string;
+    /** Идентификатор медиафайла */
     MediaId?: string;
+    /** Ссылка на изображение (MsgType: image) */
     PicUrl?: string;
+    /** Распознанный текст голосового сообщения (MsgType: voice) */
     Recognition?: string;
+    /** Формат голосового сообщения (amr, speex) */
     Format?: string;
+    /** Заголовок ссылки (MsgType: link) */
     Title?: string;
+    /** Описание ссылки (MsgType: link) */
     Description?: string;
+    /** URL (MsgType: link) */
     Url?: string;
+    /** Идентификатор превью видео */
     ThumbMediaId?: string;
+    /** Широта (MsgType: location) */
+    Location_X?: number;
+    /** Долгота (MsgType: location) */
+    Location_Y?: number;
+    /** Масштаб карты (MsgType: location) */
+    Scale?: number;
+    /** Текстовое описание места (MsgType: location) */
+    Label?: string;
+    /** Широта (Event: LOCATION — фоновая отправка геопозиции) */
+    Latitude?: number;
+    /** Долгота (Event: LOCATION) */
+    Longitude?: number;
+    /** Точность геопозиции (Event: LOCATION) */
+    Precision?: number;
+    /** Идентификатор сообщения; у событий отсутствует */
     MsgId?: number;
+    /** Тип события (MsgType: event): subscribe, unsubscribe, SCAN, CLICK, VIEW, LOCATION */
     Event?: string;
+    /** Полезная нагрузка события: ключ пункта меню или сценарий QR-кода */
     EventKey?: string;
+    /** Тикет QR-кода (события subscribe/SCAN) */
     Ticket?: string;
+    /** Статус служебного события */
     Status?: string;
 }
 
@@ -102,21 +114,35 @@ export interface IWeChatUserInfo {
     errmsg?: string;
 }
 
-/** Дополнительные опции конструктора WeChatAdapter */
+/**
+ * Дополнительные опции конструктора WeChatAdapter
+ * (второй аргумент `new WeChatAdapter(token, options)`).
+ */
 export interface IWeChatAdapterOptions {
+    /** AppID Official Account — нужен для получения access_token */
     app_id?: string;
+    /** AppSecret Official Account */
     app_secret?: string;
+    /** Ключ шифрования сообщений (режим Safe Mode); адаптером пока не используется */
     encoding_aes_key?: string;
+    /**
+     * Запрашивать имя пользователя через `user/info` на входящем сообщении
+     * и класть его в `controller.nlu.thisUser`.
+     *
+     * По умолчанию выключено: это дополнительный HTTP-запрос на каждое сообщение,
+     * а у метода жёсткий суточный лимит. Результат кэшируется в памяти процесса.
+     */
+    fetch_user_info?: boolean;
 }
 
-/** Кнопка WeChat */
+/** Кнопка меню WeChat (см. Button.buttonProcessing) */
 export interface IWeChatButton {
     title: string;
     url?: string;
     callback_data?: Record<string, unknown> | string;
 }
 
-/** Клавиатура WeChat */
+/** Меню WeChat (см. Button.buttonProcessing) */
 export interface IWeChatKeyboard {
     buttons?: IWeChatButton[];
 }

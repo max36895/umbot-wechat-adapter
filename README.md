@@ -5,104 +5,219 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![umbot](https://img.shields.io/badge/umbot-adapter-blue)](https://github.com/max36895/universal_bot-ts)
 
-> **TL;DR:** `umbot-adapter-wechat` is a bridge between the **umbot** platform and **WeChat (Weixin)**. It allows developers to build WeChat bots using the unified umbot API, handling all WeChat-specific XML parsing, signature verification, and message routing under the hood.
+> **TL;DR:** `umbot-wechat-adapter` connects a **WeChat Official Account** to the [umbot](https://github.com/max36895/universal_bot-ts)
+> framework: the same commands, steps, buttons, cards and user data you already wrote for Telegram or Alice, now on WeChat.
 
 ## 📖 About
 
-Building bots for WeChat requires dealing with its specific XML-based message format, cryptographic signature checks, and strict API rules. This adapter abstracts all that complexity away.
-
-By using this adapter, you can write your bot logic once using **umbot** and deploy it to WeChat without changing your core business logic.
+The adapter maps WeChat's message and event model onto umbot's `BotController`: text, recognised voice, images, video,
+location, links and account events (`subscribe` / `unsubscribe` / `SCAN` / `CLICK` / `VIEW` / `LOCATION`). Replies are
+sent through the **Customer Service API** (`message/custom/send`), so there is no 5-second passive-reply window to fight.
 
 ### Key Features
 
-- 🔄 **Unified API:** Use standard umbot methods (`sendMessage`, `onMessage`, etc.).
-- 🔐 **Auto-Verification:** Handles WeChat server URL verification and message signature validation automatically.
-- 📦 **XML Parsing:** Transparently converts WeChat XML payloads into standard umbot JSON objects.
-- 🚀 **Webhook & Polling:** Supports both passive webhook replies and active API calls.
-- 🛡️ **Type-Safe:** Written in TypeScript with full type definitions.
+- 🔄 **Unified API:** write `bot.addCommand(...)` / `bot.addEvent(...)` once — it works on WeChat too.
+- 🧭 **Event mapping:** WeChat events become umbot's `TEventType` (`subscribed`, `callback`, `photo`, `voice`, …).
+- 🔐 **Real WeChat signature:** SHA1 over the sorted `token/timestamp/nonce` triple, not the framework's default HMAC.
+- 🧩 **Helpers included:** XML parsing, signature check and URL verification for your HTTP layer.
+- 🖼 **Media:** images and voice with `media_id` caching in `ImageTokens` / `SoundTokens`.
+- 🗣 **TTS:** `controller.tts` is synthesised through Yandex SpeechKit and sent as a voice message.
+- 🛡️ **Type-Safe:** written in TypeScript, `strict: true`.
 
----
+## 📋 Requirements
+
+- Node.js `>= 20.19.0`
+- `umbot >= 3.1.0` (peer dependency)
+- A WeChat Official Account with `Token`, `AppID` and `AppSecret`
 
 ## 🚀 Quick Start
 
 ### 1. Installation
 
-Install the adapter and the core umbot platform via npm:
-
 ```bash
 npm install umbot umbot-wechat-adapter
-# or
-yarn add umbot umbot-wechat-adapter
 ```
 
-### 2. Basic Usage
-
-Here is a minimal example of how to initialize the WeChat adapter and handle incoming text messages.
+### 2. Wiring the adapter
 
 ```ts
 import { Bot } from 'umbot';
 import { WeChatAdapter } from 'umbot-wechat-adapter';
 
-// Initialize the adapter with your WeChat Official Account credentials
-const wechatAdapter = new WeChatAdapter({
-    token: process.env.WECHAT_TOKEN,
-    appId: process.env.WECHAT_APP_ID,
-    appSecret: process.env.WECHAT_APP_SECRET,
-});
-
-// Initialize umbot with the adapter
-const bot = new Bot();
-bot.use(wechatAdapter);
-
-// Handle incoming text messages
-bot.addCommand('hello', ['hi', 'hello'], (userCommand, ctx) => {
-    ctx.text = `Hello from umbot! You said: ${userCommand}`;
-});
-
-// Start the bot (starts the webhook server or polling depending on config)
-bot.start();
+export const bot = new Bot()
+    .use(
+        new WeChatAdapter(process.env.WECHAT_TOKEN, {
+            app_id: process.env.WECHAT_APP_ID,
+            app_secret: process.env.WECHAT_APP_SECRET,
+        }),
+    )
+    .addCommand('hello', ['hi', 'привет'], (userCommand, ctx) => {
+        ctx.text = `Hello from umbot! You said: ${userCommand}`;
+        ctx.buttons.addBtn('Каталог');
+    });
 ```
+
+### 3. The HTTP layer (required)
+
+> ⚠️ **`bot.start()` does not work with WeChat.** umbot's built-in server accepts only `POST` with a JSON body,
+> while WeChat sends **XML** and verifies the URL with a **`GET`**. Wire the endpoint yourself and hand umbot a
+> parsed object — the adapter ships the three helpers you need.
+
+```ts
+import { createServer } from 'http';
+import { URL } from 'url';
+import { handleWeChatVerification, parseWeChatXml } from 'umbot-wechat-adapter';
+import { bot } from './bot';
+
+const TOKEN = process.env.WECHAT_TOKEN!;
+
+createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
+    const params = Object.fromEntries(url.searchParams);
+
+    // 1. URL verification from the Official Account console (GET + echostr)
+    if (req.method === 'GET') {
+        const echo = handleWeChatVerification(TOKEN, params);
+        res.statusCode = echo ? 200 : 403;
+        res.end(echo ?? 'forbidden');
+        return;
+    }
+
+    // 2. Incoming message: XML body + signature in the query string
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) {
+        chunks.push(chunk as Buffer);
+    }
+    const query = parseWeChatXml(Buffer.concat(chunks).toString('utf8'));
+    if (!query) {
+        res.statusCode = 400;
+        res.end('Bad Request');
+        return;
+    }
+
+    // The adapter only sees headers, so forward the signature triple as headers.
+    const result = await bot.webhookEvent(query, {
+        'x-wechat-signature': params.signature,
+        'x-wechat-timestamp': params.timestamp,
+        'x-wechat-nonce': params.nonce,
+    });
+
+    res.statusCode = result.statusCode;
+    res.end(typeof result.body === 'string' ? result.body : JSON.stringify(result.body));
+}).listen(3000);
+```
+
+The same three headers work behind Express, Fastify or a serverless function — only the way you read
+`req.query` / `req.body` changes.
 
 ## ⚙️ Configuration
 
-The WeChatAdapter requires specific credentials from your WeChat Official Account (Subscription or Service account).
+```ts
+new WeChatAdapter(token, options);
+```
 
-| Parameter   | Type                   | Required | Description                                                                                |
-| ----------- | ---------------------- | -------- | ------------------------------------------------------------------------------------------ |
-| token       | string                 | ✅       | The Token you set in the WeChat Official Account backend. Used for signature verification. |
-| appId       | string                 | ✅       | Your WeChat AppID.                                                                         |
-| appSecret   | string                 | ✅       | Your WeChat AppSecret. Used to fetch access tokens.                                        |
-| mode        | 'webhook' \| 'polling' | ❌       | Connection mode. Defaults to 'webhook'.                                                    |
-| webhookPath | string                 | ❌       | The path for the webhook endpoint. Defaults to '/wechat'.                                  |
+| Parameter                 | Type    | Required | Description                                                                   |
+| ------------------------- | ------- | -------- | ----------------------------------------------------------------------------- |
+| `token`                   | string  | ✅       | Token from the Official Account console. Used for signature verification.     |
+| `options.app_id`          | string  | ✅       | AppID. Required to obtain `access_token`.                                     |
+| `options.app_secret`      | string  | ✅       | AppSecret.                                                                     |
+| `options.fetch_user_info` | boolean | ❌       | Fetch the sender nickname via `user/info` into `ctx.nlu.thisUser`. Off by default. |
+| `options.encoding_aes_key`| string  | ❌       | Reserved: message encryption (Safe Mode) is not implemented yet.               |
 
-## 🏗 Architecture & How it Works
+The values also land in `appConfig.tokens.wechat`, so they can be set through `bot.setAppConfig()` instead.
 
-1. Inbound Flow: WeChat sends an HTTP POST request with an XML payload to your server.
-2. Adapter Processing: umbot-adapter-wechat intercepts the request, verifies the cryptographic signature, and parses the XML.
-3. umbot Context: The parsed data is transformed into a standard umbot Context object and emitted as an event (e.g., message:text).
-4. Outbound Flow: When you call ctx.reply(), the adapter formats the response, fetches/caches the WeChat access_token, and sends it via the WeChat API.
+`fetch_user_info` is opt-in on purpose: it adds one HTTP round trip per incoming message and `user/info` has a
+hard daily quota. Results are cached in process memory (`WeChatAdapter.clearUserCache()` resets it).
 
-## ❓ FAQ & Troubleshooting
+## 🧭 Event mapping
 
-Q: I'm getting a Signature verification failed error.
+| WeChat                          | `ctx.eventType` | Notes                                                    |
+| ------------------------------- | --------------- | -------------------------------------------------------- |
+| `text`                          | `message`       | —                                                         |
+| `voice`                         | `voice`         | `ctx.userCommand` = `Recognition` (speech recognition on) |
+| `image`                         | `photo`         | `ctx.userMeta` = `{ PicUrl, MediaId }`                    |
+| `video` / `shortvideo`          | `video`         | `ctx.userMeta` = `{ MediaId, ThumbMediaId }`              |
+| `location`                      | `location`      | `ctx.userMeta` = coordinates + `Label`                    |
+| `link`                          | `message`       | `ctx.userMeta` = `{ Url, Title, Description }`            |
+| event `subscribe`               | `subscribed`    | `ctx.userCommand = 'start'`, `messageId = 0`              |
+| event `subscribe` with QR scene | `start`         | scene + ticket in `ctx.payload`                           |
+| event `unsubscribe`             | `unsubscribed`  | `skipAutoReply` — nothing can be sent any more            |
+| event `CLICK` / `SCAN`          | `callback`      | `EventKey` normalised into `ctx.userCommand`              |
+| event `VIEW`                    | `callback`      | `skipAutoReply`                                           |
+| event `LOCATION`                | `location`      | background location report                                |
 
-A: This usually happens during the initial WeChat server setup. Ensure that:
-The token in your adapter config exactly matches the Token in the WeChat backend.
-Your server is publicly accessible and returning the correct echostr during the GET verification request.
-Q: Does this adapter support WeChat Mini Programs?
+Unknown message types and service events (`TEMPLATESENDJOBFINISH`, …) set `skipAutoReply` and are answered with
+`200 OK` — returning an error would make WeChat retry the delivery.
 
-A: Currently, this adapter is optimized for WeChat Official Accounts (Messaging). Mini Program support requires a different authentication flow and is planned for v2.0.
-Q: How are Access Tokens managed?
+Because `CLICK` uses `pUtils.normalizeActionPayload`, a menu item whose key is `buy` (or `{"command":"buy"}`)
+triggers `bot.addAction('buy', …)` / `bot.addCommand('buy', …)` with no manual parsing.
 
-A: The adapter automatically fetches the access_token using your appId and appSecret. It caches the token in memory and refreshes it 5 minutes before expiration to prevent API rate limits.
+## 🎛 Buttons
+
+The Customer Service API has **no inline keyboard** — the only menu is the static Official Account menu created
+separately through `menu/create`. So buttons set by your business logic are appended to the reply as a text list:
+
+```ts
+ctx.text = 'Выберите раздел';
+ctx.buttons.addBtn('Каталог');
+ctx.buttons.addBtn('Поддержка', 'https://example.com/help');
+```
+
+```text
+Выберите раздел
+
+• Каталог
+• Поддержка: https://example.com/help
+```
+
+Up to 8 buttons are rendered; `WeChatButton.buttonProcessing()` is exported for those building the static menu.
+
+## 🖼 Media and 🗣 TTS
+
+```ts
+ctx.card.addImage('/path/to/photo.jpg', 'Название');
+ctx.sound.sounds = [{ key: '#hello#', sounds: ['/path/to/audio.mp3'] }];
+```
+
+`media_id` is cached in `ImageTokens` / `SoundTokens`, so with a DB adapter connected a file is uploaded once.
+WeChat's `media/upload` accepts **file uploads only** — a URL is skipped with a warning, so download remote files first.
+
+TTS requires `appConfig.tokens.wechat.speech_kit_token` (Yandex SpeechKit); without it `ctx.tts` is sent as plain text.
+
+## 🔌 `controller.api`
+
+```ts
+await ctx.api.sendPhoto('/path/to/photo.jpg', { caption: 'Подпись' });
+await ctx.api.sendAudio('/path/to/audio.mp3');
+ctx.api.can('sendDocument'); // false — WeChat CS API has no arbitrary files
+```
+
+Supported: `sendPhoto`, `sendAudio`. `sendDocument`, `sendVideo` and `answerCallback` log a warning and return `null`.
+
+## ⚠️ Limitations
+
+- `bot.start()` is not usable — see [The HTTP layer](#3-the-http-layer-required).
+- Message encryption (Safe Mode / `encoding_aes_key`) is not implemented; use the plaintext mode.
+- No inline keyboard: buttons are rendered as text.
+- Customer Service API requires the user to have messaged the account within the last 48 hours.
+- WeChat Mini Programs are not supported (different auth flow).
+
+## 🧪 Development
+
+```bash
+npm install
+npm run bt      # build + test
+npm run lint
+```
 
 ## 🔗 Ecosystem
 
 This package is part of the umbot ecosystem:
 
-- [umbot](https://github.com/max36895/universal_bot-ts) - The core universal bot framework (Telegram, VK, web, etc.).
-- umbot-knex-adapter - SQL Database adapter (this package).
+- [umbot](https://github.com/max36895/universal_bot-ts) — the core universal bot framework (Telegram, VK, MAX, Viber, Alice, …).
+- umbot-wechat-adapter — WeChat Official Account adapter (this package).
+- [umbot-knex-adapter](https://github.com/max36895/umbot-knex-adapter) — SQL database adapter.
 
 ## 📄 License
 
-Distributed under the MIT License. See LICENSE for more information.
+Distributed under the MIT License. See LICENSE.md for more information.
