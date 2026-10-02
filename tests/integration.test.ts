@@ -25,7 +25,10 @@ const xml = (content: string): string =>
     `<CreateTime>1700000000</CreateTime><MsgType><![CDATA[text]]></MsgType>` +
     `<Content><![CDATA[${content}]]></Content><MsgId>7</MsgId></xml>`;
 
-const headers = (timestamp = '1', nonce = 'n'): Record<string, string> => ({
+const headers = (
+    timestamp = String(Math.floor(Date.now() / 1000)),
+    nonce = 'n',
+): Record<string, string> => ({
     'x-wechat-signature': createHash('sha1')
         .update([TOKEN, timestamp, nonce].sort().join(''))
         .digest('hex'),
@@ -39,6 +42,7 @@ describe('сквозной прогон через bot.webhookEvent', () => {
     beforeEach(() => {
         jest.clearAllMocks();
         bot = new Bot();
+        bot.setLogger({ log: () => {}, error: () => {}, warn: () => {} });
         bot.use(new WeChatAdapter(TOKEN, { app_id: 'id', app_secret: 'secret' })).addCommand(
             'hello',
             ['привет'],
@@ -54,8 +58,15 @@ describe('сквозной прогон через bot.webhookEvent', () => {
 
         const res = await bot.webhookEvent(query, headers());
         expect(res.statusCode).toBe(200);
-        expect(res.body).toBe('ok');
+        // Пустое тело: WeChat ничего не делает и не повторяет доставку
+        expect(res.body).toBe('');
         expect(sendTextMessage).toHaveBeenCalledWith('open_1', 'Здравствуйте!');
+    });
+
+    it('повторную доставку того же сообщения (WeChat ждёт ответа 5 с) обрабатывает один раз', async () => {
+        await bot.webhookEvent(parseWeChatXml(xml('Привет')), headers());
+        await bot.webhookEvent(parseWeChatXml(xml('Привет')), headers());
+        expect(sendTextMessage).toHaveBeenCalledTimes(1);
     });
 
     it('отклоняет запрос с неверной подписью до бизнес-логики', async () => {

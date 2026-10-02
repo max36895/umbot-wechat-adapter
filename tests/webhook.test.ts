@@ -1,5 +1,10 @@
 import { createHash } from 'crypto';
-import { handleWeChatVerification, parseWeChatXml, verifyWeChatSignature } from '../src';
+import {
+    handleWeChatVerification,
+    parseWeChatXml,
+    verifyWeChatSignature,
+    WECHAT_MAX_XML_LENGTH,
+} from '../src';
 
 const TOKEN = 'my_secret_token';
 
@@ -43,6 +48,40 @@ describe('parseWeChatXml', () => {
         expect(parseWeChatXml('<xml><Foo>bar</Foo></xml>')).toBeNull();
     });
 
+    it('64-битный MsgId сохраняет строкой: число потеряло бы точность', () => {
+        const msg = (id: string): string =>
+            '<xml><ToUserName>a</ToUserName><FromUserName>b</FromUserName><CreateTime>1</CreateTime>' +
+            `<MsgType>text</MsgType><MsgId>${id}</MsgId></xml>`;
+        expect(parseWeChatXml(msg('6371049185735245824'))?.MsgId).toBe('6371049185735245824');
+        // Соседние id не сливаются в одно значение
+        expect(parseWeChatXml(msg('6371049185735245825'))?.MsgId).toBe('6371049185735245825');
+    });
+
+    it('вложенный тег (ScanCodeInfo) остаётся строкой и не ломает разбор', () => {
+        const xml =
+            '<xml><ToUserName>a</ToUserName><FromUserName>b</FromUserName><CreateTime>1</CreateTime>' +
+            '<MsgType>event</MsgType><Event>scancode_push</Event>' +
+            '<ScanCodeInfo><ScanType>qrcode</ScanType><ScanResult>1</ScanResult></ScanCodeInfo>' +
+            '<EventKey>k</EventKey></xml>';
+        const res = parseWeChatXml(xml) as unknown as Record<string, unknown>;
+        expect(res.ScanCodeInfo).toBe('<ScanType>qrcode</ScanType><ScanResult>1</ScanResult>');
+        expect(res.EventKey).toBe('k');
+    });
+
+    it('незакрытые теги разбирает за линейное время', () => {
+        const body = '<xml><ToUserName>a</ToUserName>' + '<a>'.repeat(200_000) + '</xml>';
+        const start = Date.now();
+        expect(parseWeChatXml(body)).toBeNull();
+        expect(Date.now() - start).toBeLessThan(500);
+    });
+
+    it('отклоняет тело больше лимита', () => {
+        const xml =
+            '<xml><ToUserName>a</ToUserName><FromUserName>b</FromUserName><CreateTime>1</CreateTime>' +
+            `<MsgType>text</MsgType><Content>${'x'.repeat(WECHAT_MAX_XML_LENGTH)}</Content></xml>`;
+        expect(parseWeChatXml(xml)).toBeNull();
+    });
+
     it('не даёт записать ключи прототипа', () => {
         const xml =
             '<xml><ToUserName>a</ToUserName><FromUserName>b</FromUserName>' +
@@ -61,6 +100,17 @@ describe('verifyWeChatSignature', () => {
 
     it('отклоняет подпись от чужого токена', () => {
         expect(verifyWeChatSignature(TOKEN, sign('123', 'abc', 'other'), '123', 'abc')).toBe(false);
+    });
+
+    it('с maxAgeSec отклоняет устаревший и непарсящийся timestamp', () => {
+        const now = Math.floor(Date.now() / 1000);
+        const fresh = String(now - 60);
+        const old = String(now - 600);
+        expect(verifyWeChatSignature(TOKEN, sign(fresh, 'n'), fresh, 'n', 300)).toBe(true);
+        expect(verifyWeChatSignature(TOKEN, sign(old, 'n'), old, 'n', 300)).toBe(false);
+        expect(verifyWeChatSignature(TOKEN, sign('abc', 'n'), 'abc', 'n', 300)).toBe(false);
+        // Без maxAgeSec время не проверяется — как раньше
+        expect(verifyWeChatSignature(TOKEN, sign(old, 'n'), old, 'n')).toBe(true);
     });
 
     it('отклоняет неполные параметры', () => {

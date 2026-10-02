@@ -1,7 +1,12 @@
-import { ISoundInfo, Text, SoundTokens, isFile, unlink, BotController } from 'umbot';
+import { ISoundInfo, Text, SoundTokens, isFile, BotController } from 'umbot';
 import { WeChatRequest } from './API/WeChatRequest';
-import { pUtils, YandexSpeechKit } from 'umbot/plugins';
-import { T_WECHAT } from './constants';
+import { pUtils } from 'umbot/plugins';
+import { T_WECHAT, WECHAT_INVALID_MEDIA_ID } from './constants';
+import { IWeChatResult } from './IWeChatPlatform';
+
+// О ссылке вместо файла предупреждаем один раз за процесс: звуки берутся из кода, и
+// предупреждение на каждом ответе только засоряло бы лог
+let urlWarned = false;
 
 /**
  * Возвращает media_id аудиофайла: из кэша токенов в БД либо после загрузки в WeChat.
@@ -10,7 +15,7 @@ import { T_WECHAT } from './constants';
  * свежезагруженный файл (cache miss) пользователю не уходил вовсе.
  *
  * @param controller Контроллер приложения
- * @param path Путь к аудиофайлу (AMR/SILK/MP3)
+ * @param path Путь к аудиофайлу (AMR или MP3, до 2 МБ и 60 секунд)
  * @returns media_id либо `null`
  */
 export async function getSoundInDB(
@@ -31,12 +36,68 @@ export async function getSoundInDB(
 }
 
 /**
+ * Удаляет сохранённый media_id аудиофайла из кэша токенов.
+ * @param controller Контроллер приложения
+ * @param path Путь к аудиофайлу
+ */
+async function forgetSoundToken(controller: BotController, path: string): Promise<void> {
+    if (!controller.appContext.database.adapter) {
+        return;
+    }
+    const model = new SoundTokens(controller.appContext);
+    if (await model.whereOne({ platform: T_WECHAT, path })) {
+        await model.remove();
+    }
+}
+
+/**
+ * Отправляет голосовое сообщение по media_id. Просроченный media_id (WeChat хранит файл
+ * 3 дня) удаляется из кэша, файл загружается заново и отправка повторяется один раз.
+ *
+ * @param controller Контроллер приложения
+ * @param api Клиент WeChat
+ * @param mediaId media_id аудиофайла
+ * @param path Путь к файлу; без него загрузить заново нечего
+ * @returns Ответ WeChat и media_id, который ушёл пользователю (новый, если файл загружался
+ *   заново), либо `null` при ошибке
+ *
+ * @example
+ * ```ts
+ * const mediaId = await getSoundInDB(controller, './hello.mp3');
+ * if (mediaId) {
+ *     const api = new WeChatRequest(controller.appContext);
+ *     await sendVoiceWithRefresh(controller, api, mediaId, './hello.mp3');
+ * }
+ * ```
+ */
+export async function sendVoiceWithRefresh(
+    controller: BotController,
+    api: WeChatRequest,
+    mediaId: string,
+    path?: string | null,
+): Promise<{ result: IWeChatResult; mediaId: string } | null> {
+    const userId = controller.userId as string;
+    const res = await api.sendVoice(userId, mediaId);
+    if (res) {
+        return { result: res, mediaId };
+    }
+    if (!path || api.lastErrorCode !== WECHAT_INVALID_MEDIA_ID) {
+        return null;
+    }
+    await forgetSoundToken(controller, path);
+    const freshId = await getSoundInDB(controller, path);
+    const fresh = freshId ? await api.sendVoice(userId, freshId) : null;
+    return fresh && freshId ? { result: fresh, mediaId: freshId } : null;
+}
+
+/**
  * Обработка звуков для WeChat (голосовые сообщения через Customer Service API).
  *
- * Каждый звук отправляется отдельным сообщением. Если задан `tts` и настроен
- * `speech_kit_token`, текст дополнительно синтезируется через Yandex SpeechKit.
+ * Каждый звук — файл AMR или MP3 — отправляется отдельным сообщением. `tts` голосом не
+ * синтезируется: SpeechKit отдаёт OGG/Opus, а WeChat принимает голос только в AMR и MP3.
+ * Озвучка доходит до пользователя текстом — её отправляет адаптер.
  *
- * @param soundInfo Описание звуков и текста для озвучки
+ * @param soundInfo Описание звуков
  * @param controller Контроллер приложения
  * @returns Список отправленных media_id
  */
@@ -44,50 +105,35 @@ export async function soundProcessing(
     soundInfo: ISoundInfo,
     controller: BotController,
 ): Promise<string[]> {
-    const { sounds, text } = soundInfo;
+    const { sounds } = soundInfo;
     const api = new WeChatRequest(controller.appContext);
     const data: string[] = [];
 
-    if (sounds) {
-        for (let i = 0; i < sounds.length; i++) {
-            const sound = sounds[i];
-            if (sound.sounds !== undefined && sound.key !== undefined) {
-                const sText: string | null = Text.getText(sound.sounds);
-                if (!sText) {
-                    continue;
-                }
-                // media_id можно получить только из файла: URL и локальный путь
-                // сначала превращаются в токен, а произвольная строка (маркер
-                // звука голосовой платформы) в WeChat смысла не имеет.
-                if (!Text.isUrl(sText) && !(await isFile(sText))) {
-                    continue;
-                }
-                const mediaId = await getSoundInDB(controller, sText);
-                if (mediaId) {
-                    await api.sendVoice(controller.userId as string, mediaId);
-                    data.push(mediaId);
-                }
-            }
+    for (const sound of sounds ?? []) {
+        if (sound.sounds === undefined || sound.key === undefined) {
+            continue;
         }
-    }
-
-    // getSpeechText убирает разметку голосовых платформ (<speaker>, паузы,
-    // маркеры #sound#) — иначе SpeechKit зачитал бы её вслух.
-    const speechText = pUtils.getSpeechText(text);
-    const speechKitToken = controller.appContext.appConfig.tokens[T_WECHAT]?.speech_kit_token;
-    if (speechText && speechKitToken) {
-        const speechKit = new YandexSpeechKit(String(speechKitToken), controller.appContext);
-        const content = await speechKit.getTts(speechText);
-        if (content) {
-            try {
-                const voiceMedia = await api.uploadVoice(content.fileName);
-                if (voiceMedia?.media_id) {
-                    await api.sendVoice(controller.userId as string, voiceMedia.media_id);
-                    data.push(voiceMedia.media_id);
-                }
-            } finally {
-                await unlink(content.fileName);
+        const path: string | null = Text.getText(sound.sounds);
+        if (!path) {
+            continue;
+        }
+        if (Text.isUrl(path)) {
+            if (!urlWarned) {
+                urlWarned = true;
+                controller.appContext.logWarn(
+                    `WeChat.soundProcessing(): звук по ссылке ("${path}") не отправлен — WeChat принимает только загрузку файла. Скачайте файл и укажите локальный путь.`,
+                );
             }
+            continue;
+        }
+        // Произвольная строка (маркер звука голосовой платформы) в WeChat смысла не имеет
+        if (!(await isFile(path))) {
+            continue;
+        }
+        const mediaId = await getSoundInDB(controller, path);
+        const sent = mediaId ? await sendVoiceWithRefresh(controller, api, mediaId, path) : null;
+        if (sent) {
+            data.push(sent.mediaId);
         }
     }
     return data;

@@ -1,4 +1,4 @@
-import { AppContext, BotController, IControllerApi, TEventType, Text } from 'umbot';
+import { AppContext, BotController, IControllerApi, TEventType } from 'umbot';
 import { BasePlatformAdapter, EMPTY_CONTEXT_ERROR, EMPTY_QUERY_ERROR, pUtils } from 'umbot/plugins';
 import { buttonsToText } from './Button';
 import { cardProcessing } from './Card';
@@ -8,6 +8,7 @@ import { IWeChatRequestContent } from './IWeChatPlatform';
 import { WeChatRequest } from './API/WeChatRequest';
 import { makeWeChatApi } from './apiFacade';
 import { verifyWeChatSignature } from './webhook';
+import { truncateUtf8 } from './utils';
 
 /**
  * Имена заголовков, в которых транспортный слой передаёт адаптеру параметры
@@ -18,12 +19,29 @@ const SIGNATURE_HEADER = 'x-wechat-signature';
 const TIMESTAMP_HEADER = 'x-wechat-timestamp';
 const NONCE_HEADER = 'x-wechat-nonce';
 
+/** Допустимое расхождение `timestamp` подписи с текущим временем по умолчанию, сек */
+const DEFAULT_SIGNATURE_MAX_AGE = 300;
+
+/**
+ * Сколько сообщений Customer Service API можно отправить в ответ: 5 за 48 часов после
+ * сообщения пользователя, 3 за минуту после подписки, нажатия меню или сканирования QR-кода.
+ */
+const MESSAGE_REPLY_LIMIT = 5;
+const EVENT_REPLY_LIMIT = 3;
+const USER_MESSAGE_EVENTS: ReadonlySet<TEventType> = new Set([
+    'message',
+    'voice',
+    'photo',
+    'video',
+    'location',
+]);
+
 /**
  * Адаптер для WeChat Official Account.
  *
  * Поддерживает текст, голос (Recognition), события (subscribe/CLICK/SCAN/LOCATION),
  * изображения, видео, геолокацию и ссылки. Ответы отправляются через Customer
- * Service API (без ограничения 5 сек пассивного ответа).
+ * Service API, а на сам вебхук WeChat ждёт ответа не дольше 5 секунд — см. README.
  *
  * ⚠️ WeChat присылает вебхук в XML, а ядро umbot принимает только JSON, поэтому
  * встроенный сервер (`bot.start()`) с WeChat не работает. Разберите тело через
@@ -68,17 +86,11 @@ export class WeChatAdapter extends BasePlatformAdapter<IWeChatRequestContent> {
     ];
 
     /**
-     * Кэш имён пользователей: у `user/info` жёсткий суточный лимит на стороне
-     * WeChat, а запрос делается на каждое входящее сообщение.
-     */
-    static #userInfoCache = new Map<string, string | null>();
-
-    /**
-     * Сбрасывает кэш данных пользователей WeChat.
-     * Нужен в тестах и при смене Official Account в рамках одного процесса.
+     * Оставлен для совместимости: имена пользователей больше не запрашиваются и не кэшируются.
+     * @deprecated WeChat не возвращает никнейм в `user/info` с 27.12.2021.
      */
     static clearUserCache(): void {
-        WeChatAdapter.#userInfoCache.clear();
+        // Кэша больше нет — очищать нечего
     }
 
     init(appContext: AppContext): void {
@@ -95,6 +107,11 @@ export class WeChatAdapter extends BasePlatformAdapter<IWeChatRequestContent> {
         }
         if (this._platformOptions?.app_secret) {
             tokens.app_secret = this._platformOptions.app_secret as string;
+        }
+        if (this._platformOptions?.fetch_user_info) {
+            appContext.logWarn(
+                'WeChatAdapter: опция fetch_user_info больше ничего не делает — с 27.12.2021 WeChat не возвращает никнейм в user/info. Уберите её из настроек.',
+            );
         }
     }
 
@@ -135,6 +152,10 @@ export class WeChatAdapter extends BasePlatformAdapter<IWeChatRequestContent> {
      * `x-wechat-nonce` (см. README). Если `token` не настроен — проверка
      * пропускается, как и в ядре (opt-in).
      *
+     * Подпись не покрывает тело запроса, поэтому `timestamp` старше `signature_max_age` секунд
+     * (по умолчанию 300, 0 — без проверки) отклоняется: перехваченные параметры подписи
+     * нельзя приложить к своему телу позже.
+     *
      * @param _query Тело запроса (в схеме подписи WeChat не участвует)
      * @param headers Заголовки HTTP-запроса
      */
@@ -143,11 +164,13 @@ export class WeChatAdapter extends BasePlatformAdapter<IWeChatRequestContent> {
             return true;
         }
         const token = this.appContext?.appConfig.tokens[this.platformName]?.token as string;
+        const maxAge = this._platformOptions?.signature_max_age;
         return verifyWeChatSignature(
             token,
             headers?.[SIGNATURE_HEADER] as string,
             headers?.[TIMESTAMP_HEADER] as string,
             headers?.[NONCE_HEADER] as string,
+            typeof maxAge === 'number' ? maxAge : DEFAULT_SIGNATURE_MAX_AGE,
         );
     }
 
@@ -157,7 +180,7 @@ export class WeChatAdapter extends BasePlatformAdapter<IWeChatRequestContent> {
 
     async setQueryData(query: IWeChatRequestContent, controller: BotController): Promise<boolean> {
         if (!this.appContext) {
-            console.log(`WeChatAdapter.setQueryData(): ${EMPTY_CONTEXT_ERROR}`);
+            controller.platformOptions.error = `WeChatAdapter.setQueryData(): ${EMPTY_CONTEXT_ERROR}`;
             return false;
         }
         if (!query) {
@@ -243,42 +266,7 @@ export class WeChatAdapter extends BasePlatformAdapter<IWeChatRequestContent> {
                 break;
         }
 
-        await this.#setUserInfo(query.FromUserName, controller);
-
         return true;
-    }
-
-    /**
-     * Заполняет данные отправителя в NLU.
-     *
-     * Запрос к `user/info` — лишний сетевой round-trip на каждое сообщение, поэтому
-     * он выполняется только при `options.fetch_user_info: true` и кэшируется на
-     * время жизни процесса.
-     */
-    async #setUserInfo(openId: string, controller: BotController): Promise<void> {
-        if (!this._platformOptions?.fetch_user_info) {
-            return;
-        }
-        try {
-            let nickname = WeChatAdapter.#userInfoCache.get(openId);
-            if (nickname === undefined) {
-                const userInfo = await new WeChatRequest(this.appContext as AppContext).getUserInfo(
-                    openId,
-                );
-                nickname = userInfo?.nickname || null;
-                WeChatAdapter.#userInfoCache.set(openId, nickname);
-            }
-            pUtils.setThisUserToNlu(controller, {
-                username: null,
-                first_name: nickname,
-                last_name: null,
-            });
-        } catch (e) {
-            // Не прерываем обработку запроса, если getUserInfo упал.
-            this.appContext?.logWarn(
-                `WeChatAdapter.setQueryData(): не удалось получить данные пользователя: ${e instanceof Error ? e.message : String(e)}`,
-            );
-        }
     }
 
     #handleEvent(query: IWeChatRequestContent, controller: BotController): void {
@@ -343,35 +331,77 @@ export class WeChatAdapter extends BasePlatformAdapter<IWeChatRequestContent> {
         }
     }
 
-    async getContent(controller: BotController): Promise<string> {
-        if (controller.skipAutoReply) {
-            return 'ok';
+    /**
+     * ID доставки для дедупликации повторов. WeChat повторяет вебхук до трёх раз, если не
+     * получил ответ за 5 секунд, а ответ ждёт отправки через Customer Service API.
+     * Сообщения различаются по `MsgId` (так рекомендует WeChat), события — по отправителю,
+     * времени и типу события: `MsgId` у них нет.
+     * @param query Тело запроса
+     * @returns ID доставки или null, если различить повтор не по чему
+     */
+    getDeliveryId(query: IWeChatRequestContent): string | null {
+        if (query?.MsgId !== undefined && query.MsgId !== null) {
+            return String(query.MsgId);
         }
-        const api = new WeChatRequest(this.appContext as AppContext);
+        if (!query?.FromUserName || query.CreateTime === undefined) {
+            return null;
+        }
+        return `${query.FromUserName}:${query.CreateTime}:${query.Event ?? query.MsgType}`;
+    }
 
-        // Если бизнес-логика заполнила только tts (типично для логики, писавшейся
-        // под голосовые платформы), отправляем его как текст.
+    /**
+     * Собирает текст ответа: текст (или tts), подписи изображений и кнопки списком.
+     *
+     * Подписи идут в текст, потому что Customer Service API разрешает лишь несколько
+     * сообщений на одно действие пользователя. Кнопки — тоже текстом: клавиатуры у API нет.
+     * @param controller Контроллер запроса
+     * @returns Текст ответа (пустая строка, если отправлять нечего)
+     */
+    #composeText(controller: BotController): string {
+        // Только tts (логика, написанная под голосовые платформы) уходит текстом
         let text = pUtils.getChatText(controller.text, controller.tts);
-
-        // У Customer Service API нет клавиатуры — варианты ответа дописываем
-        // списком в текст, иначе кнопки, заданные бизнес-логикой, просто теряются.
-        const hasButtons = controller.isButtonsInit() && controller.buttons.buttons.length > 0;
-        if (hasButtons) {
+        const images = controller.isCardInit() ? controller.card.images : [];
+        const captions = images
+            .map((image) => (image.title || image.desc || '').trim())
+            .filter((caption) => caption && caption !== text);
+        if (captions.length) {
+            text = [text, ...captions].filter(Boolean).join('\n\n');
+        }
+        if (controller.isButtonsInit() && controller.buttons.buttons.length > 0) {
             const buttonsText = controller.buttons.getButtons<string>(buttonsToText);
             if (buttonsText) {
                 text = text ? `${text}\n\n${buttonsText}` : buttonsText;
             }
         }
+        return text;
+    }
+
+    /**
+     * Отправляет ответ через Customer Service API.
+     * @returns Пустую строку — тело HTTP-ответа WeChat. Пустой ответ WeChat принимает и не
+     *   повторяет доставку; ответ в другом формате WeChat считает ошибкой сервера.
+     */
+    async getContent(controller: BotController): Promise<string> {
+        if (controller.skipAutoReply) {
+            return '';
+        }
+        const api = new WeChatRequest(this.appContext as AppContext);
+        const text = this.#composeText(controller);
+        const images = controller.isCardInit() ? controller.card.images : [];
+        const soundCount =
+            controller.isSoundInit() && controller.sound.sounds.length > 0
+                ? controller.sound.sounds.length
+                : 0;
+        this.#warnReplyLimit(controller, (text ? 1 : 0) + images.length + soundCount);
 
         if (text) {
             await api.sendTextMessage(
                 controller.userId as string,
-                Text.resize(text, WECHAT_MAX_TEXT_LENGTH),
+                truncateUtf8(text, WECHAT_MAX_TEXT_LENGTH, '...'),
             );
         }
 
-        const hasCards = controller.isCardInit() && controller.card.images.length > 0;
-        if (hasCards) {
+        if (images.length) {
             try {
                 await controller.card.getCards(cardProcessing, controller);
             } catch (e) {
@@ -382,10 +412,8 @@ export class WeChatAdapter extends BasePlatformAdapter<IWeChatRequestContent> {
             }
         }
 
-        // shouldProcessChatSound учитывает и заданные звуки, и tts при настроенном
-        // speech_kit_token — иначе озвучка tts на WeChat не отправлялась вовсе.
-        const hasSounds = pUtils.shouldProcessChatSound(controller, this.platformName);
-        if (hasSounds) {
+        // tts голосом не отправляется: SpeechKit отдаёт OGG/Opus, а WeChat принимает AMR и MP3
+        if (soundCount) {
             try {
                 await controller.sound.getSounds(controller.tts, soundProcessing, controller);
             } catch (e) {
@@ -396,13 +424,31 @@ export class WeChatAdapter extends BasePlatformAdapter<IWeChatRequestContent> {
             }
         }
 
-        if (!text && !hasCards && !hasSounds) {
+        if (!text && !images.length && !soundCount) {
             this.appContext?.logWarn(
                 'WeChatAdapter.getContent(): ответ не содержит ни текста, ни tts, ни вложений — пользователю ничего не отправлено.',
             );
         }
 
-        return 'ok';
+        return '';
+    }
+
+    /**
+     * Предупреждает, если ответ состоит из большего числа сообщений, чем WeChat разрешает
+     * отправить на одно действие пользователя: лишние сообщения WeChat отклонит.
+     * @param controller Контроллер запроса
+     * @param count Сколько сообщений будет отправлено
+     */
+    #warnReplyLimit(controller: BotController, count: number): void {
+        const limit =
+            controller.eventType && USER_MESSAGE_EVENTS.has(controller.eventType)
+                ? MESSAGE_REPLY_LIMIT
+                : EVENT_REPLY_LIMIT;
+        if (count > limit) {
+            this.appContext?.logWarn(
+                `WeChatAdapter.getContent(): ответ состоит из ${count} сообщений, а WeChat разрешает ${limit} на это действие пользователя — последние не дойдут. Сократите число картинок и звуков.`,
+            );
+        }
     }
 
     static isVoice(): boolean {

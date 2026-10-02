@@ -45,8 +45,11 @@ export interface IWeChatRequestContent {
     Longitude?: number;
     /** Точность геопозиции (Event: LOCATION) */
     Precision?: number;
-    /** Идентификатор сообщения; у событий отсутствует */
-    MsgId?: number;
+    /**
+     * Идентификатор сообщения (64-битное целое); у событий отсутствует.
+     * Строка, если значение не помещается в безопасное целое JS.
+     */
+    MsgId?: number | string;
     /** Тип события (MsgType: event): subscribe, unsubscribe, SCAN, CLICK, VIEW, LOCATION */
     Event?: string;
     /** Полезная нагрузка события: ключ пункта меню или сценарий QR-кода */
@@ -126,23 +129,49 @@ export interface IWeChatAdapterOptions {
     /** Ключ шифрования сообщений (режим Safe Mode); адаптером пока не используется */
     encoding_aes_key?: string;
     /**
-     * Запрашивать имя пользователя через `user/info` на входящем сообщении
-     * и класть его в `controller.nlu.thisUser`.
-     *
-     * По умолчанию выключено: это дополнительный HTTP-запрос на каждое сообщение,
-     * а у метода жёсткий суточный лимит. Результат кэшируется в памяти процесса.
+     * Ничего не делает: оставлена для совместимости, при включении адаптер пишет предупреждение.
+     * @deprecated С 27.12.2021 WeChat не возвращает никнейм в `user/info`.
      */
     fetch_user_info?: boolean;
+    /**
+     * Допустимое расхождение `timestamp` подписи с текущим временем, сек. По умолчанию 300;
+     * 0 — не проверять. Подпись WeChat не покрывает тело запроса, и без проверки времени
+     * перехваченные параметры подписи можно приложить к своему телу когда угодно.
+     */
+    signature_max_age?: number;
 }
 
-/** Кнопка меню WeChat (см. Button.buttonProcessing) */
+/**
+ * Кнопка в формате, похожем на кнопки umbot (см. Button.buttonProcessing).
+ * @deprecated Это не формат WeChat; для меню используйте {@link IWeChatMenuButton}.
+ */
 export interface IWeChatButton {
     title: string;
     url?: string;
     callback_data?: Record<string, unknown> | string;
 }
 
-/** Меню WeChat (см. Button.buttonProcessing) */
+/**
+ * Список кнопок из Button.buttonProcessing.
+ * @deprecated Это не формат WeChat; для меню используйте {@link IWeChatMenu}.
+ */
 export interface IWeChatKeyboard {
     buttons?: IWeChatButton[];
+}
+
+/** Пункт меню Official Account для `menu/create` */
+export interface IWeChatMenuButton {
+    /** `click` — событие CLICK с `key`; `view` — переход по `url` */
+    type: 'click' | 'view';
+    /** Название пункта: до 16 байт UTF-8 */
+    name: string;
+    /** Ключ для события CLICK: до 128 байт */
+    key?: string;
+    /** Ссылка для `view`: до 1024 байт */
+    url?: string;
+}
+
+/** Тело запроса `menu/create` */
+export interface IWeChatMenu {
+    button: IWeChatMenuButton[];
 }

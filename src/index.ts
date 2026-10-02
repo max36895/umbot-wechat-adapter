@@ -19,5 +19,10 @@ export { makeWeChatApi } from './apiFacade';
  * Транспортный слой: разбор XML-тела вебхука, проверка подписи и верификация URL.
  * Нужны, потому что ядро umbot принимает только JSON и только POST.
  */
-export { parseWeChatXml, verifyWeChatSignature, handleWeChatVerification } from './webhook';
+export {
+    parseWeChatXml,
+    verifyWeChatSignature,
+    handleWeChatVerification,
+    WECHAT_MAX_XML_LENGTH,
+} from './webhook';
 export { T_WECHAT, WECHAT_MAX_TEXT_LENGTH, WECHAT_MAX_BUTTONS } from './constants';

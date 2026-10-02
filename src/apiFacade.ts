@@ -1,7 +1,7 @@
 import type { BotController, IApiMediaParams, IControllerApi, TApiMethod } from 'umbot';
 import { WeChatRequest } from './API/WeChatRequest';
-import { getImageInDB } from './Card';
-import { getSoundInDB } from './Sound';
+import { getImageInDB, sendImageWithRefresh } from './Card';
+import { getSoundInDB, sendVoiceWithRefresh } from './Sound';
 
 /**
  * API-фасад WeChat для `controller.api`.
@@ -33,7 +33,8 @@ export function makeWeChatApi(controller: BotController): IControllerApi {
                 return warn('sendPhoto', `не удалось загрузить изображение "${image}" в WeChat.`);
             }
             const api = new WeChatRequest(controller.appContext);
-            const res = await api.sendImage(controller.userId as string, mediaId);
+            const res =
+                (await sendImageWithRefresh(controller, api, mediaId, image))?.result ?? null;
             // У msgtype image в WeChat нет подписи — отправляем её отдельным сообщением.
             if (params?.caption) {
                 await api.sendTextMessage(controller.userId as string, params.caption);
@@ -50,7 +51,8 @@ export function makeWeChatApi(controller: BotController): IControllerApi {
                 return warn('sendAudio', `не удалось загрузить аудио "${file}" в WeChat.`);
             }
             const api = new WeChatRequest(controller.appContext);
-            const res = await api.sendVoice(controller.userId as string, mediaId);
+            const res =
+                (await sendVoiceWithRefresh(controller, api, mediaId, file))?.result ?? null;
             if (params?.caption) {
                 await api.sendTextMessage(controller.userId as string, params.caption);
             }

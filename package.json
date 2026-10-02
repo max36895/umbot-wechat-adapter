@@ -1,6 +1,6 @@
 {
     "name": "umbot-wechat-adapter",
-    "version": "1.0.1",
+    "version": "1.1.0",
     "description": "Official WeChat (Weixin) adapter for the umbot platform. Seamlessly build, deploy, and manage WeChat bots with a unified API.",
     "keywords": [
         "umbot",
@@ -51,7 +51,7 @@
         "LICENSE.md"
     ],
     "peerDependencies": {
-        "umbot": ">=3.1.0"
+        "umbot": "^3.1.0"
     },
     "devDependencies": {
         "@eslint/js": "^10.0.1",
@@ -69,7 +69,7 @@
         "typedoc": "^0.28.18",
         "typescript": "^5.9.3",
         "typescript-eslint": "^8.60.0",
-        "umbot": "^3.1.2"
+        "umbot": "^3.1.4"
     },
     "funding": {
         "type": "individual",

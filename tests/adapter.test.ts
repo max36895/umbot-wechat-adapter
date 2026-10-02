@@ -45,6 +45,8 @@ describe('WeChatAdapter', () => {
         jest.clearAllMocks();
         WeChatAdapter.clearUserCache();
         appContext = new AppContext();
+        // Предупреждения адаптера пишутся в файл асинхронно и доходили бы после конца теста
+        appContext.setLogger({ log: () => {}, error: () => {}, warn: () => {} });
         adapter = new WeChatAdapter(TOKEN, { app_id: 'id', app_secret: 'secret' });
         adapter.init(appContext);
         controller = new BaseBotController(appContext);
@@ -101,14 +103,32 @@ describe('WeChatAdapter', () => {
         const sign = (timestamp: string, nonce: string): string =>
             createHash('sha1').update([TOKEN, timestamp, nonce].sort().join('')).digest('hex');
 
+        const headersAt = (timestamp: string): Record<string, string> => ({
+            'x-wechat-signature': sign(timestamp, 'n'),
+            'x-wechat-timestamp': timestamp,
+            'x-wechat-nonce': 'n',
+        });
+        const now = (): number => Math.floor(Date.now() / 1000);
+
         it('принимает запрос с корректной подписью WeChat (sha1, не HMAC тела)', () => {
-            expect(
-                adapter.isCorrectQuery(request(), {
-                    'x-wechat-signature': sign('1', 'n'),
-                    'x-wechat-timestamp': '1',
-                    'x-wechat-nonce': 'n',
-                }),
-            ).toBe(true);
+            expect(adapter.isCorrectQuery(request(), headersAt(String(now())))).toBe(true);
+        });
+
+        it('отклоняет подпись старше 5 минут: подпись не покрывает тело запроса', () => {
+            expect(adapter.isCorrectQuery(request(), headersAt(String(now() - 301)))).toBe(false);
+            expect(adapter.isCorrectQuery(request(), headersAt(String(now() - 290)))).toBe(true);
+        });
+
+        it('signature_max_age меняет срок, 0 — без проверки времени', () => {
+            const make = (age: number): WeChatAdapter => {
+                const ctx = new AppContext();
+                ctx.setLogger({ log: () => {}, error: () => {}, warn: () => {} });
+                const custom = new WeChatAdapter(TOKEN, { signature_max_age: age });
+                custom.init(ctx);
+                return custom;
+            };
+            expect(make(0).isCorrectQuery(request(), headersAt('1'))).toBe(true);
+            expect(make(30).isCorrectQuery(request(), headersAt(String(now() - 60)))).toBe(false);
         });
 
         it('отклоняет запрос без подписи, когда токен настроен', () => {
@@ -136,13 +156,23 @@ describe('WeChatAdapter', () => {
             expect(controller.messageId).toBe(1);
         });
 
+        it('без контекста приложения возвращает false и пишет причину в platformOptions', async () => {
+            const bare = new WeChatAdapter(TOKEN);
+            expect(await bare.setQueryData(request(), controller)).toBe(false);
+            expect(String(controller.platformOptions.error)).toContain(
+                'WeChatAdapter.setQueryData()',
+            );
+        });
+
         it('не ходит в user/info без опции fetch_user_info', async () => {
             await adapter.setQueryData(request(), controller);
             expect(getUserInfo).not.toHaveBeenCalled();
         });
 
-        it('запрашивает и кэширует имя пользователя при fetch_user_info', async () => {
+        it('fetch_user_info больше не ходит в user/info и предупреждает при старте', async () => {
             const ctx = new AppContext();
+            const warn = jest.fn();
+            ctx.setLogger({ log: () => {}, error: () => {}, warn });
             const withInfo = new WeChatAdapter(TOKEN, {
                 app_id: 'id',
                 app_secret: 'secret',
@@ -150,8 +180,11 @@ describe('WeChatAdapter', () => {
             });
             withInfo.init(ctx);
             await withInfo.setQueryData(request(), new BaseBotController(ctx));
-            await withInfo.setQueryData(request(), new BaseBotController(ctx));
-            expect(getUserInfo).toHaveBeenCalledTimes(1);
+            expect(getUserInfo).not.toHaveBeenCalled();
+            expect(warn).toHaveBeenCalledWith(
+                expect.stringContaining('fetch_user_info больше ничего не делает'),
+                undefined,
+            );
         });
 
         it('размечает голосовое сообщение', async () => {
@@ -245,6 +278,24 @@ describe('WeChatAdapter', () => {
         });
     });
 
+    describe('getDeliveryId', () => {
+        it('сообщение — по MsgId', () => {
+            expect(adapter.getDeliveryId(request({ MsgId: 42 }))).toBe('42');
+        });
+
+        it('событие без MsgId — по отправителю, времени и типу события', () => {
+            const event = request({ MsgType: 'event', Event: 'CLICK', MsgId: undefined });
+            expect(adapter.getDeliveryId(event)).toBe('open_id_1:1700000000:CLICK');
+        });
+
+        it('без отправителя или времени — null (без дедупликации)', () => {
+            expect(
+                adapter.getDeliveryId(request({ MsgId: undefined, CreateTime: undefined })),
+            ).toBeNull();
+            expect(adapter.getDeliveryId(null as unknown as IWeChatRequestContent)).toBeNull();
+        });
+    });
+
     describe('getContent', () => {
         beforeEach(async () => {
             await adapter.setQueryData(request(), controller);
@@ -252,7 +303,7 @@ describe('WeChatAdapter', () => {
 
         it('отправляет текст', async () => {
             controller.text = 'Ответ';
-            expect(await adapter.getContent(controller)).toBe('ok');
+            expect(await adapter.getContent(controller)).toBe('');
             expect(sendTextMessage).toHaveBeenCalledWith('open_id_1', 'Ответ');
         });
 
@@ -273,24 +324,64 @@ describe('WeChatAdapter', () => {
             expect(sent).toContain('Выберите\n\n• Каталог\n• Помощь: https://example.com');
         });
 
-        it('обрезает текст по лимиту платформы', async () => {
-            controller.text = 'a'.repeat(3000);
+        it('обрезает текст по лимиту платформы в байтах UTF-8', async () => {
+            controller.text = 'я'.repeat(3000);
             await adapter.getContent(controller);
-            expect((sendTextMessage.mock.calls[0][1] as string).length).toBeLessThanOrEqual(2048);
+            const sent = sendTextMessage.mock.calls[0][1] as string;
+            expect(Buffer.byteLength(sent, 'utf8')).toBeLessThanOrEqual(2048);
+            expect(sent.endsWith('...')).toBe(true);
+            // Кириллица — 2 байта: символов вдвое меньше лимита
+            expect(sent.length).toBe(1022 + 3);
         });
 
-        it('отправляет изображение карточки', async () => {
-            controller.text = '';
+        it('не обрезает текст, который помещается в лимит', async () => {
+            controller.text = 'я'.repeat(1024);
+            await adapter.getContent(controller);
+            expect(sendTextMessage.mock.calls[0][1]).toBe(controller.text);
+        });
+
+        it('отправляет изображение карточки, подпись — в тексте ответа, а не отдельным сообщением', async () => {
+            controller.text = 'Каталог';
             controller.card.addImage('image_token_1', 'Заголовок');
+            controller.card.addImage('image_token_2', 'Второй');
             await adapter.getContent(controller);
             expect(sendImage).toHaveBeenCalledWith('open_id_1', 'image_token_1');
-            expect(sendTextMessage).toHaveBeenCalledWith('open_id_1', 'Заголовок');
+            expect(sendImage).toHaveBeenCalledWith('open_id_1', 'image_token_2');
+            expect(sendTextMessage).toHaveBeenCalledTimes(1);
+            expect(sendTextMessage).toHaveBeenCalledWith(
+                'open_id_1',
+                'Каталог\n\nЗаголовок\n\nВторой',
+            );
+        });
+
+        it('предупреждает, если ответ не помещается в лимит сообщений WeChat', async () => {
+            const warn = jest.fn();
+            appContext.setLogger({ log: () => {}, error: () => {}, warn });
+            controller.text = 'Фото';
+            for (let i = 0; i < 5; i++) {
+                controller.card.addImage(`image_${i}`, '');
+            }
+            controller.eventType = 'message';
+            await adapter.getContent(controller);
+            expect(warn).toHaveBeenCalledWith(
+                expect.stringContaining('ответ состоит из 6 сообщений, а WeChat разрешает 5'),
+                undefined,
+            );
+
+            warn.mockClear();
+            controller.card.clear();
+            controller.card.addImage('image_1', '');
+            controller.card.addImage('image_2', '');
+            controller.card.addImage('image_3', '');
+            controller.eventType = 'callback';
+            await adapter.getContent(controller);
+            expect(warn).toHaveBeenCalledWith(expect.stringContaining('разрешает 3'), undefined);
         });
 
         it('ничего не отправляет при skipAutoReply', async () => {
             controller.text = 'Ответ';
             controller.skipAutoReply = true;
-            expect(await adapter.getContent(controller)).toBe('ok');
+            expect(await adapter.getContent(controller)).toBe('');
             expect(sendTextMessage).not.toHaveBeenCalled();
         });
     });
